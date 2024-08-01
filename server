@@ -39,6 +39,19 @@ split() {
    IFS=$'\n' read -d "" -ra arr <<< "${1//$2/$'\n'}"
 }
 
+function listen() {
+  local TOPIC
+  TOPIC="$1"
+  if [[ -z "$TOPIC" ]]; then
+    debug "ATTEMPTED TO LISTEN ON EMPTY TOPIC"
+    return
+  fi
+  while true; do
+    [[ -z "${SUBS[$TOPIC]}" ]] && break
+    cat "$TOPIC"
+  done
+}
+
 function subscribe() {
   local TOPIC
   TOPIC="$1"
@@ -65,15 +78,21 @@ function unsubscribe() {
 
 function broadcast() {
   local TOPIC
+  local IGNORE
   local line
   TOPIC="$1"
+  IGNORE="$2"
   if [[ -z "$TOPIC" ]]; then
     return
   fi
   if [[ ! -d "pubsub/${TOPIC}" ]]; then
     return
   fi
-  TEE_ARGS=$(find pubsub/"${TOPIC}" -type p)
+  if [[ -z "$IGNORE" ]]; then
+    TEE_ARGS=$(find pubsub/"${TOPIC}" -type p)
+  else
+    TEE_ARGS=$(find pubsub/"${TOPIC}" -type p ! -iname "$IGNORE")
+  fi
   if [[ -z "$TEE_ARGS" ]]; then
     return
   fi
@@ -109,7 +128,7 @@ if [[ -z "$IRC_CONN_HANDLER" ]]; then
   export IRC_SERVER_CREATED="$(date)"
   tcpserver -1 -o -l 0 -H -R -c 1000 0 $PORT $0
 else
-  echo "connection opened with $TCPREMOTEIP" 1>&2
+  # echo "connection opened with $TCPREMOTEIP" 1>&2
   while IFS= read -r line; do
     split "${line//$'\r'}" ' '
     if [[ "${arr[0]}" =~ :(.+) ]]; then
@@ -136,7 +155,7 @@ else
       PRIVMSG)
         TARGET="${arr[0]}"
         arr=("${arr[@]:1}")
-        printf "%s\r\n" ":$NICK PRIVMSG $TARGET ${arr[@]}" | broadcast "$TARGET"
+        printf "%s\r\n" ":$NICK PRIVMSG $TARGET ${arr[*]}" | broadcast "$TARGET" "$NICK"
         debug "FORWARDING MESSAGE TO $TARGET"
 
         ;;
@@ -157,8 +176,8 @@ else
               continue
             fi
             subscribe "$CHANNEL"
-            cat "$SUBSCRIPTION" &
             SUBS["$SUBSCRIPTION"]=true
+            listen "$SUBSCRIPTION" &
             printf "%s\r\n" ":$NICK JOIN $CHANNEL" | broadcast "$CHANNEL"
           done
         fi
@@ -172,7 +191,7 @@ else
         ;;
     esac
   done
-  echo "connection closed with $TCPREMOTEIP" 1>&2
+  # echo "connection closed with $TCPREMOTEIP" 1>&2
   for SUB in "${!SUBS[@]}"; do
     unsubscribe "$SUB"
   done

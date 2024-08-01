@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+
+set noglob
+
+ORM_DB=db.sqlite
+VERSION=0.0.1
+IRC_SERVER_HOST=localhost
+
+# self explanatory
+function query() {
+  function _query() {
+    local QUERY
+    QUERY="$1"
+    shift
+    printf ".parameter init\n"
+    INDEX=1
+    for arg in "$@"; do
+      : "${arg//\\/\\\\\\\\}"
+      : "${_//$'\t'/    }"
+      : "${_//\"/\\\"}"
+      : "${_//\'/\\\'}"
+      : "${_//$'\n'/\\\\n}"
+      if [[ "$_" =~ "'" ]]; then
+        printf ".parameter set ?%d \"%s\"\n" $INDEX "$_"
+      else
+        printf ".parameter set ?%d \"'%s'\"\n" $INDEX "$_"
+      fi
+      ((INDEX++))
+    done
+    printf "%s\n" "$QUERY";
+  }
+  sqlite3 -separator $'\t' "$ORM_DB" < <(_query "$@")
+}
+
+split() {
+   # Usage: split "string" "delimiter"
+   IFS=$'\n' read -d "" -ra arr <<< "${1//$2/$'\n'}"
+}
+
+reply() {
+  local CODE="$1"
+  shift
+  local RESPONSE
+  printf -v "RESPONSE" ":%s %s %s %s\r\n" "$IRC_SERVER_HOST" "$CODE" "$NICK" "$@"
+  RESPONSE="${RESPONSE:0:512}"
+  printf "%s" "$RESPONSE"
+  debug "REPLYING: $RESPONSE"
+}
+
+debug() {
+  printf "%s\n" "$@" 1>&2
+}
+
+if [[ -z "$IRC_CONN_HANDLER" ]]; then
+
+  query 'CREATE TABLE IF NOT EXISTS channels
+    (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name varchar(201)
+    );'
+
+  echo "i am the server" 1>&2
+  PORT=6667
+  echo -n "Starting server on port "
+
+  export IRC_CONN_HANDLER=true
+  export IRC_SERVER_CREATED="$(date)"
+  tcpserver -1 -o -l 0 -H -R -c 1000 0 $PORT $0
+else
+  echo "connection opened with $TCPREMOTEIP" 1>&2
+  while IFS= read -r line; do
+    split "$line" ' '
+    if [[ "${arr[0]}" =~ :(.+) ]]; then
+      PREFIX="${BASH_REMATCH[1]}"
+      debug "PREFIX: '$PREFIX'"
+      arr=("${arr[@]:1}")
+    fi
+    COMMAND="${arr[0]}"
+    debug "COMMAND: '$COMMAND'"
+    arr=("${arr[@]:1}")
+    case "${COMMAND^^}" in
+      NICK)
+        NICK="${arr[0]//$'\r'}"
+        ;;
+      USER)
+        USER="${arr[0]}"
+        MODE="${arr[1]}"
+        REALNAME="${arr[3]//$'\r'}"
+        reply 001 ":Welcome, $NICK!$USER"
+        reply 002 ":Your host is $IRC_SERVER_HOST, running version $VERSION"
+        reply 003 ":This server was created $IRC_SERVER_CREATED"
+        reply 004 "$IRC_SERVER_HOST bash-$VERSION"
+        ;;
+      *)
+        debug "UNRECOGNIZED COMMAND"
+        debug "${arr[@]}"
+        ;;
+    esac
+  done
+  echo "connection closed with $TCPREMOTEIP" 1>&2
+fi

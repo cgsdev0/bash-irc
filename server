@@ -6,6 +6,7 @@ ORM_DB=db.sqlite
 VERSION=0.0.1
 IRC_SERVER_HOST=localhost
 
+declare -A SUBS
 # self explanatory
 function query() {
   function _query() {
@@ -35,6 +36,47 @@ function query() {
 split() {
    # Usage: split "string" "delimiter"
    IFS=$'\n' read -d "" -ra arr <<< "${1//$2/$'\n'}"
+}
+
+function subscribe() {
+  local TOPIC
+  TOPIC="$1"
+  if [[ -z "$TOPIC" ]]; then
+    debug "ATTEMPTED TO SUBSCRIBE ON EMPTY TOPIC"
+    return
+  fi
+  mkdir -p pubsub/"${TOPIC}"
+  local tmppipe=pubsub/"${TOPIC}/${NICK}"
+  mkfifo -m 600 "$tmppipe"
+  SUBSCRIPTION="$tmppipe"
+}
+
+function unsubscribe() {
+  local TOPIC
+  TOPIC="$1"
+  if [[ "$TOPIC" != "pubsub/"* ]]; then
+    debug "FAILED TO UNSUBSCRIBE"
+    return
+  fi
+  rm -f "$TOPIC"
+  unset SUBS["$TOPIC"]
+}
+
+function broadcast() {
+  local TOPIC
+  local line
+  TOPIC="$1"
+  if [[ -z "$TOPIC" ]]; then
+    return
+  fi
+  if [[ ! -d "pubsub/${TOPIC}" ]]; then
+    return
+  fi
+  TEE_ARGS=$(find pubsub/"${TOPIC}" -type p)
+  if [[ -z "$TEE_ARGS" ]]; then
+    return
+  fi
+  tee $TEE_ARGS > /dev/null
 }
 
 reply() {
@@ -69,7 +111,7 @@ if [[ -z "$IRC_CONN_HANDLER" ]]; then
 else
   echo "connection opened with $TCPREMOTEIP" 1>&2
   while IFS= read -r line; do
-    split "$line" ' '
+    split "${line//$'\r'}" ' '
     if [[ "${arr[0]}" =~ :(.+) ]]; then
       PREFIX="${BASH_REMATCH[1]}"
       debug "PREFIX: '$PREFIX'"
@@ -80,16 +122,49 @@ else
     arr=("${arr[@]:1}")
     case "${COMMAND^^}" in
       NICK)
-        NICK="${arr[0]//$'\r'}"
+        NICK="${arr[0]}"
         ;;
       USER)
         USER="${arr[0]}"
         MODE="${arr[1]}"
-        REALNAME="${arr[3]//$'\r'}"
+        REALNAME="${arr[3]}"
         reply 001 ":Welcome, $NICK!$USER"
         reply 002 ":Your host is $IRC_SERVER_HOST, running version $VERSION"
         reply 003 ":This server was created $IRC_SERVER_CREATED"
         reply 004 "$IRC_SERVER_HOST bash-$VERSION"
+        ;;
+      PRIVMSG)
+        TARGET="${arr[0]}"
+        arr=("${arr[@]:1}")
+        printf "%s\r\n" ":$NICK PRIVMSG $TARGET ${arr[@]}" | broadcast "$TARGET"
+        debug "FORWARDING MESSAGE TO $TARGET"
+
+        ;;
+      JOIN)
+        if [[ "${arr[@]}" == "0" ]]; then
+          debug "YOU LEFT, IDK WHAT TO DO"
+        else
+          CHANNELS="${arr[0]}"
+          KEYS="${arr[1]}"
+          split "$CHANNELS" ','
+          CHANNELS=("${arr[@]}")
+          split "$KEYS" ','
+          KEYS=("${arr[@]}")
+          debug "CHANNELS: ${CHANNELS[@]}"
+          debug "KEYS: ${KEYS[@]}"
+          for CHANNEL in ${CHANNELS[@]}; do
+            if [[ "$CHANNEL" != "#test" ]]; then
+              continue
+            fi
+            subscribe "$CHANNEL"
+            cat "$SUBSCRIPTION" &
+            SUBS["$SUBSCRIPTION"]=true
+            printf "%s\r\n" ":$NICK JOIN $CHANNEL" | broadcast "$CHANNEL"
+          done
+        fi
+        ;;
+      PING)
+        reply PONG "${arr[0]}"
         ;;
       *)
         debug "UNRECOGNIZED COMMAND"
@@ -98,4 +173,7 @@ else
     esac
   done
   echo "connection closed with $TCPREMOTEIP" 1>&2
+  for SUB in "${!SUBS[@]}"; do
+    unsubscribe "$SUB"
+  done
 fi

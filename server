@@ -5,6 +5,7 @@ set noglob
 ORM_DB=db.sqlite
 VERSION=0.0.1
 IRC_SERVER_HOST=localhost
+PORT=${PORT:-6667}
 
 declare -A SUBS
 # self explanatory
@@ -102,7 +103,6 @@ if [[ -z "$IRC_CONN_HANDLER" ]]; then
     );'
 
   echo "i am the server" 1>&2
-  PORT=6667
   echo -n "Starting server on port "
 
   export IRC_CONN_HANDLER=true

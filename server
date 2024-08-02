@@ -85,7 +85,8 @@ function subscribe() {
 }
 
 function unsubscribe() {
-  debug "PIPE CLOSING: $SUBSCRIPTION"
+  [[ ! -z "$UNSUBBED" ]] && return
+  UNSUBBED=true
   rm -f "$SUBSCRIPTION"
   debug "PIPE CLOSED: $SUBSCRIPTION"
 }
@@ -109,6 +110,20 @@ debug() {
   printf "%s\n" "$@" 1>&2
 }
 
+PONG_COUNT=0
+PING=0
+heartbeat() {
+  while [[ -z "$UNSUBBED" ]]; do
+    if [[ $PONG_COUNT -lt $PING ]]; then
+      debug "NO PONG? GOODBYE"
+      exit 1
+    fi
+    reply PING ":$PING"
+    ((PING++))
+    sleep 60
+  done
+}
+
 if [[ -z "$IRC_CONN_HANDLER" ]]; then
 
   rm -rf pubsub
@@ -126,10 +141,12 @@ if [[ -z "$IRC_CONN_HANDLER" ]]; then
 
   export IRC_CONN_HANDLER=true
   export IRC_SERVER_CREATED="$(date)"
-  tcpserver -1 -o -l 0 -H -R -c 1000 0 $PORT $0
+  tcpserver -1 -o -l 0 -H -D -R -c 1000 0 $PORT $0
 else
   # echo "connection opened with $TCPREMOTEIP" 1>&2
   subscribe
+  heartbeat &
+  trap unsubscribe EXIT
   while IFS= read -r line; do
     split "${line//$'\r'}" ' '
     if [[ "${arr[0]}" =~ :(.+) ]]; then
@@ -190,12 +207,15 @@ else
       PING)
         reply PONG "$NICK" "${arr[0]}"
         ;;
+      PONG)
+        ((PONG_COUNT++))
+        ;;
       *)
         debug "UNRECOGNIZED COMMAND"
         debug "${arr[@]}"
         ;;
     esac
   done
-  # echo "connection closed with $TCPREMOTEIP" 1>&2
   unsubscribe
+  # echo "connection closed with $TCPREMOTEIP" 1>&2
 fi

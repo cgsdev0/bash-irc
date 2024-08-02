@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 
+cd "${0%/*}"
+
 set noglob
 
 ORM_DB=db.sqlite
 VERSION=0.0.1
-IRC_SERVER_HOST=localhost
+IRC_SERVER_HOST=127.0.0.1
 PORT=${PORT:-6667}
 
 declare -A SUBS
@@ -46,64 +48,58 @@ function listen() {
     debug "ATTEMPTED TO LISTEN ON EMPTY TOPIC"
     return
   fi
+  local -a arr
   while true; do
-    [[ -z "${SUBS[$TOPIC]}" ]] && break
-    cat "$TOPIC"
+    IFS= read -r line < "$TOPIC"
+    split "${line//$'\r'}" ' '
+    if [[ "${arr[0]}" =~ :(.+) ]]; then
+      PREFIX="${BASH_REMATCH[1]}"
+      arr=("${arr[@]:1}")
+    fi
+    COMMAND="${arr[0]}"
+    debug "LISTENED COMMAND: '$COMMAND'"
+    arr=("${arr[@]:1}")
+
+    case "$COMMAND" in
+      PRIVMSG)
+        [[ "${PREFIX%%@*}" == "$NICK" ]] && continue
+        ;;
+      JOIN)
+        ;;
+      *)
+        continue
+        ;;
+    esac
+    # forward the message
+    printf "%s\n" "$line"
+    debug "SENT: '${line//$'\r'/\\r}'"
   done
 }
 
 function subscribe() {
-  local TOPIC
-  TOPIC="$1"
-  if [[ -z "$TOPIC" ]]; then
-    debug "ATTEMPTED TO SUBSCRIBE ON EMPTY TOPIC"
-    return
-  fi
-  mkdir -p pubsub/"${TOPIC}"
-  local tmppipe=pubsub/"${TOPIC}/${NICK}"
+  mkdir -p pubsub/irc
+  local tmppipe=$(mktemp -up pubsub/irc)
   mkfifo -m 600 "$tmppipe"
   SUBSCRIPTION="$tmppipe"
+  debug "PIPE CREATED: $tmppipe"
 }
 
 function unsubscribe() {
-  local TOPIC
-  TOPIC="$1"
-  if [[ "$TOPIC" != "pubsub/"* ]]; then
-    debug "FAILED TO UNSUBSCRIBE"
-    return
-  fi
-  rm -f "$TOPIC"
-  unset SUBS["$TOPIC"]
+  debug "PIPE CLOSING: $SUBSCRIPTION"
+  rm -f "$SUBSCRIPTION"
+  debug "PIPE CLOSED: $SUBSCRIPTION"
 }
 
 function broadcast() {
-  local TOPIC
-  local IGNORE
-  local line
-  TOPIC="$1"
-  IGNORE="$2"
-  if [[ -z "$TOPIC" ]]; then
-    return
-  fi
-  if [[ ! -d "pubsub/${TOPIC}" ]]; then
-    return
-  fi
-  if [[ -z "$IGNORE" ]]; then
-    TEE_ARGS=$(find pubsub/"${TOPIC}" -type p)
-  else
-    TEE_ARGS=$(find pubsub/"${TOPIC}" -type p ! -iname "$IGNORE")
-  fi
-  if [[ -z "$TEE_ARGS" ]]; then
-    return
-  fi
+  [[ ! -d "pubsub/irc" ]] && return
+  TEE_ARGS=$(find pubsub/irc -type p)
+  [[ -z "$TEE_ARGS" ]] && return
   tee $TEE_ARGS > /dev/null
 }
 
 reply() {
-  local CODE="$1"
-  shift
   local RESPONSE
-  printf -v "RESPONSE" ":%s %s %s %s\r\n" "$IRC_SERVER_HOST" "$CODE" "$NICK" "$@"
+  printf -v "RESPONSE" ":%s %s\r\n" "$IRC_SERVER_HOST" "$*"
   RESPONSE="${RESPONSE:0:512}"
   printf "%s" "$RESPONSE"
   debug "REPLYING: $RESPONSE"
@@ -114,6 +110,10 @@ debug() {
 }
 
 if [[ -z "$IRC_CONN_HANDLER" ]]; then
+
+  rm -rf pubsub
+  mkdir pubsub
+
 
   query 'CREATE TABLE IF NOT EXISTS channels
     (
@@ -129,6 +129,7 @@ if [[ -z "$IRC_CONN_HANDLER" ]]; then
   tcpserver -1 -o -l 0 -H -R -c 1000 0 $PORT $0
 else
   # echo "connection opened with $TCPREMOTEIP" 1>&2
+  subscribe
   while IFS= read -r line; do
     split "${line//$'\r'}" ' '
     if [[ "${arr[0]}" =~ :(.+) ]]; then
@@ -140,6 +141,10 @@ else
     debug "COMMAND: '$COMMAND'"
     arr=("${arr[@]:1}")
     case "${COMMAND^^}" in
+      # CAP)
+      #   CAP="${arr[0]}"
+      #   reply CAP "* NAK :"
+      #   ;;
       NICK)
         NICK="${arr[0]}"
         ;;
@@ -147,15 +152,16 @@ else
         USER="${arr[0]}"
         MODE="${arr[1]}"
         REALNAME="${arr[3]}"
-        reply 001 ":Welcome, $NICK!$USER"
-        reply 002 ":Your host is $IRC_SERVER_HOST, running version $VERSION"
-        reply 003 ":This server was created $IRC_SERVER_CREATED"
-        reply 004 "$IRC_SERVER_HOST bash-$VERSION"
+        reply 001 $NICK ":Welcome, $NICK!$USER@$IRC_SERVER_HOST"
+        reply 002 $NICK ":Your host is $IRC_SERVER_HOST, running version $VERSION"
+        reply 003 $NICK ":This server was created $IRC_SERVER_CREATED"
+        reply 004 $NICK "$IRC_SERVER_HOST bash-$VERSION"
+        reply 376 $NICK ":End of the /MOTD command."
         ;;
       PRIVMSG)
         TARGET="${arr[0]}"
         arr=("${arr[@]:1}")
-        printf "%s\r\n" ":$NICK PRIVMSG $TARGET ${arr[*]}" | broadcast "$TARGET" "$NICK"
+        printf "%s\r\n" ":$NICK PRIVMSG $TARGET ${arr[*]}" | broadcast
         debug "FORWARDING MESSAGE TO $TARGET"
 
         ;;
@@ -169,21 +175,20 @@ else
           CHANNELS=("${arr[@]}")
           split "$KEYS" ','
           KEYS=("${arr[@]}")
-          debug "CHANNELS: ${CHANNELS[@]}"
-          debug "KEYS: ${KEYS[@]}"
           for CHANNEL in ${CHANNELS[@]}; do
             if [[ "$CHANNEL" != "#test" ]]; then
               continue
             fi
-            subscribe "$CHANNEL"
-            SUBS["$SUBSCRIPTION"]=true
+            debug "$NICK joined $CHANNEL"
+            SUBS["$CHANNEL"]=true
             listen "$SUBSCRIPTION" &
-            printf "%s\r\n" ":$NICK JOIN $CHANNEL" | broadcast "$CHANNEL"
+            printf "%s\r\n" ":$NICK!$USER@$IRC_SERVER_HOST JOIN :$CHANNEL" | broadcast
+            reply 366 $NICK $CHANNEL :
           done
         fi
         ;;
       PING)
-        reply PONG "${arr[0]}"
+        reply PONG "$NICK" "${arr[0]}"
         ;;
       *)
         debug "UNRECOGNIZED COMMAND"
@@ -192,7 +197,5 @@ else
     esac
   done
   # echo "connection closed with $TCPREMOTEIP" 1>&2
-  for SUB in "${!SUBS[@]}"; do
-    unsubscribe "$SUB"
-  done
+  unsubscribe
 fi

@@ -1,0 +1,11 @@
+#!/bin/bash
+
+# lmao dont judge me it works for me
+
+while true; do
+    tmux send-keys -t "%137" '\./server |& logfilter' Enter
+    sleep 0.1
+    inotifywait -qq "server" -e MODIFY -e MOVE_SELF
+    tmux send-keys -t "%137" C-c
+    echo "reloading..."
+done

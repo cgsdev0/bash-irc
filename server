@@ -2,7 +2,10 @@
 
 cd "${0%/*}"
 
-set noglob
+set -o noglob
+
+# you do NOT want to know why
+export LC_ALL=C
 
 ORM_DB=db.sqlite
 VERSION=0.0.1
@@ -16,6 +19,10 @@ function query() {
     local QUERY
     QUERY="$1"
     shift
+    printf "PRAGMA foreign_keys = ON;\n"
+    printf ".output /dev/null\n"
+    printf "PRAGMA journal_mode = WAL;\n"
+    printf ".output\n"
     printf ".parameter init\n"
     INDEX=1
     for arg in "$@"; do
@@ -33,7 +40,7 @@ function query() {
     done
     printf "%s\n" "$QUERY";
   }
-  sqlite3 -separator $'\t' "$ORM_DB" < <(_query "$@")
+  sqlite3 -separator $'\t' "$ORM_DB" 2>&1 < <(_query "$@")
 }
 
 split() {
@@ -59,10 +66,22 @@ function listen() {
     COMMAND="${arr[0]}"
     arr=("${arr[@]:1}")
 
-    USER="${PREFIX%%@*}"
-    USER="${USER%%!*}"
+    local USER="${PREFIX%%@*}"
+    local USER="${USER%%!*}"
 
     case "$COMMAND" in
+      PSST)
+        # internal stuff dont worry its all good
+        debug "psst: ${arr[*]}"
+        CMD="${arr[0]}"
+        arr=("${arr[@]:1}")
+        case "$CMD" in
+          NICK)
+            NICK="${arr[0]}"
+            ;;
+        esac
+        continue
+        ;;
       PRIVMSG)
         CHANNEL="${arr[0]}"
         [[ "$USER" == "$NICK" ]] && continue
@@ -73,11 +92,27 @@ function listen() {
           SUBS["$CHANNEL"]=true
         fi
         ;;
+      PART)
+        CHANNEL="${arr[0]:1}"
+        if [[ "$USER" == "$NICK" ]]; then
+          debug "listener: $USER PARTED from $CHANNEL"
+          unset SUBS["$CHANNEL"]
+        fi
+        ;;
+      NICK)
+        if [[ "$USER" == "$NICK" ]]; then
+          NICK="${arr[0]}"
+        fi
+        ;;
+      QUIT)
+        ;;
       *)
         continue
         ;;
     esac
-    [[ -z "${SUBS[$CHANNEL]}" ]] && debug "FILTERED BY CHANNEL" && continue
+    if [[ "$USER" != "$NICK" && -n "$CHANNEL" ]]; then
+      [[ -z "${SUBS[$CHANNEL]}" ]] && debug "FILTERED BY '$CHANNEL' '$USER' '$NICK'" && continue
+    fi
     # forward the message
     printf "%s\n" "$line"
   done
@@ -93,17 +128,19 @@ function subscribe() {
 
 function unsubscribe() {
   [[ ! -z "$UNSUBBED" ]] && return
-  rm -rf "$HEARTBEAT"
   UNSUBBED=true
-  rm -f "$SUBSCRIPTION"
   debug "pipe: closed: $SUBSCRIPTION"
+  [[ ! -z "$SUBSCRIPTION" ]] && rm -f "$SUBSCRIPTION"
+  query 'DELETE FROM conns WHERE id = ?;' "$CONN_ID"
+  rm -rf "$HEARTBEAT"
 }
 
 function broadcast() {
   [[ ! -d "pubsub/irc" ]] && return
   TEE_ARGS=$(find pubsub/irc -type p)
   [[ -z "$TEE_ARGS" ]] && return
-  tee $TEE_ARGS > /dev/null
+  printf "broadcast: " 1>&2
+  tee /dev/stderr $TEE_ARGS > /dev/null
 }
 
 reply() {
@@ -111,7 +148,7 @@ reply() {
   printf -v "RESPONSE" ":%s %s\r\n" "$IRC_SERVER_HOST" "$*"
   RESPONSE="${RESPONSE:0:512}"
   printf "%s" "$RESPONSE"
-  debug "outbound: ${RESPONSE//$'\n'/}"
+  debug "outbound[$CONN_ID]: ${RESPONSE//$'\n'/}"
 }
 
 debug() {
@@ -143,24 +180,59 @@ if [[ -z "$IRC_CONN_HANDLER" ]]; then
   query 'CREATE TABLE IF NOT EXISTS channels
     (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name varchar(201)
+      name varchar(201) NOT NULL UNIQUE
     );'
+
+  query 'INSERT INTO channels(name) VALUES("#test");'
+
+  query 'CREATE TABLE IF NOT EXISTS conns
+    (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      nick varchar(201) UNIQUE
+    );'
+
+  query 'CREATE TABLE IF NOT EXISTS membership
+    (
+      channel INTEGER,
+      who INTEGER,
+      PRIMARY KEY (channel, who),
+      FOREIGN KEY(channel) REFERENCES channels(id) ON DELETE CASCADE,
+      FOREIGN KEY(who) REFERENCES conns(id) ON DELETE CASCADE
+    );'
+
+  query "DELETE FROM conns; DELETE FROM SQLITE_SEQUENCE WHERE name='conns';"
 
   echo -n "main: Starting server on port "
 
   export IRC_CONN_HANDLER=true
   export IRC_SERVER_CREATED="$(date)"
+
   tcpserver -v -1 -o -l 0 -H -D -R -c 1000 0 $PORT $0
+
 else
+  REGISTERED=
+  welcome() {
+    [[ -n "$REGISTERED" ]] && return;
+    REGISTERED=1
+    reply 001 $NICK ":Welcome, $NICK!$USER@$IRC_SERVER_HOST"
+    reply 002 $NICK ":Your host is $IRC_SERVER_HOST, running version $VERSION"
+    reply 003 $NICK ":This server was created $IRC_SERVER_CREATED"
+    reply 004 $NICK "$IRC_SERVER_HOST bash-$VERSION"
+    reply 376 $NICK ":End of the /MOTD command."
+  }
+
   PING=0
   PONG=0
   # echo "connection opened with $TCPREMOTEIP" 1>&2
   subscribe
+  listen "$SUBSCRIPTION" &
   mkdir -p pubsub/heartbeat
   HEARTBEAT="$(mktemp -p pubsub/heartbeat)"
   debug "heartbeat: opened $HEARTBEAT"
   echo 0 > "$HEARTBEAT"
   heartbeat &
+  CONN_ID="$(query 'INSERT INTO conns DEFAULT VALUES RETURNING id;')"
+  debug "conn_id: $CONN_ID"
   trap unsubscribe EXIT
   while IFS= read -r line; do
     split "${line//$'\r'}" ' '
@@ -169,7 +241,7 @@ else
       arr=("${arr[@]:1}")
     fi
     COMMAND="${arr[0]}"
-    debug "inbound: $COMMAND"
+    debug "inbound[$CONN_ID]: ${line//$'\r'}"
     arr=("${arr[@]:1}")
     case "${COMMAND^^}" in
       # CAP)
@@ -177,28 +249,54 @@ else
       #   reply CAP "* NAK :"
       #   ;;
       NICK)
-        NICK="${arr[0]}"
+        NICK_REGEX='^[A-}][-0-9A-}]{0,8}$'
+        NEW_NICK="${arr[0]#:}"
+        if [[ -z "$NEW_NICK" ]]; then
+          reply 431 ":No nickname given"
+        elif [[ ! "$NEW_NICK" =~ $NICK_REGEX ]]; then
+          reply 432 $NEW_NICK ":Erroneous nickname"
+        else
+          RESULT="$(query 'UPDATE conns SET nick = ? WHERE id = ?;' "$NEW_NICK" "$CONN_ID")"
+          if [[ -n "$RESULT" ]]; then
+            debug "result: $RESULT"
+            debug "error: nickname $NEW_NICK already in use"
+            reply 433 '*' $NEW_NICK ":Nickname is already in use"
+          else
+            if [[ -n "$NICK" ]]; then
+              printf "%s\r\n" ":$NICK!$USER@$IRC_SERVER_HOST NICK $NEW_NICK" | broadcast
+              NICK="$NEW_NICK"
+            else
+              NICK="$NEW_NICK"
+              debug "PSSSSSSSSSSSST NICK $NICK"
+              echo "PSST NICK $NICK" > "$SUBSCRIPTION"
+              welcome
+            fi
+          fi
+        fi
         ;;
       USER)
         USER="${arr[0]}"
         MODE="${arr[1]}"
         REALNAME="${arr[3]}"
-        reply 001 $NICK ":Welcome, $NICK!$USER@$IRC_SERVER_HOST"
-        reply 002 $NICK ":Your host is $IRC_SERVER_HOST, running version $VERSION"
-        reply 003 $NICK ":This server was created $IRC_SERVER_CREATED"
-        reply 004 $NICK "$IRC_SERVER_HOST bash-$VERSION"
-        reply 376 $NICK ":End of the /MOTD command."
-        listen "$SUBSCRIPTION" &
+        if [[ -n "$NICK" ]]; then
+          welcome
+        fi
         ;;
       PRIVMSG)
         TARGET="${arr[0]}"
         arr=("${arr[@]:1}")
-        printf "%s\r\n" ":$NICK PRIVMSG $TARGET ${arr[*]}" | broadcast
+        MSG="${arr[*]}"
+        if [[ "${MSG:0:1}" != ":" ]]; then
+          MSG=":$MSG"
+        fi
+        printf "%s\r\n" ":$NICK PRIVMSG $TARGET $MSG" | broadcast
         ;;
       JOIN)
         if [[ "${arr[@]}" == "0" ]]; then
           debug "joins: $NICK did join 0"
-        else
+        elif [[ -z "$REGISTERED" ]]; then
+            reply 451 '*' ':You have not registered'
+        elif [[ -n "$NICK" ]]; then
           CHANNELS="${arr[0]}"
           KEYS="${arr[1]}"
           split "$CHANNELS" ','
@@ -206,15 +304,36 @@ else
           split "$KEYS" ','
           KEYS=("${arr[@]}")
           for CHANNEL in ${CHANNELS[@]}; do
-            if [[ "$CHANNEL" != "#test" ]]; then
+            CHANNEL_ID="$(query "SELECT id FROM channels WHERE name = ?;" "$CHANNEL")"
+            if [[ -z "$CHANNEL_ID" ]]; then
               continue
             fi
+            query "INSERT INTO membership(channel, who) VALUES(?, ?);" "$CHANNEL_ID" "$CONN_ID"
             debug "joins: $NICK joined $CHANNEL"
             SUBS["$CHANNEL"]=true
             printf "%s\r\n" ":$NICK!$USER@$IRC_SERVER_HOST JOIN :$CHANNEL" | broadcast
             reply 366 $NICK $CHANNEL :
           done
         fi
+        ;;
+      QUIT)
+        QUIT_MESSAGE="${arr[*]#:}"
+        printf "%s\r\n" ":$NICK!$USER@$IRC_SERVER_HOST QUIT :$QUIT_MESSAGE" | broadcast
+        exit 0
+        ;;
+      PART)
+        CHANNELS="${arr[0]}"
+        KEYS="${arr[1]}"
+        split "$CHANNELS" ','
+        CHANNELS=("${arr[@]}")
+        split "$KEYS" ','
+        KEYS=("${arr[@]}")
+
+        for CHANNEL in ${CHANNELS[@]}; do
+          unset SUBS["$CHANNEL"]
+          printf "%s\r\n" ":$NICK!$USER@$IRC_SERVER_HOST PART :$CHANNEL" | broadcast
+          :
+        done
         ;;
       PING)
         reply PONG "$NICK" "${arr[0]}"

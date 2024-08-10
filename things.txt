@@ -1,0 +1,13 @@
+Implement nicknames properly
+
+Commands:
+[ ] NICK command
+[ ] LIST command
+[x] PART command
+[x] QUIT command
+[ ] MODE command
+[ ] NAMES command
+[ ] WHOIS command
+[ ] KICK command
+[ ] BAN command
+[ ] MUTE command

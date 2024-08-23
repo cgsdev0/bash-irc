@@ -1,10 +1,12 @@
-Implement nicknames properly
+TLS
+TOPICS
 
 Commands:
-[ ] NICK command
-[ ] LIST command
+[x] NICK command
+[x] LIST command
 [x] PART command
 [x] QUIT command
+[ ] TOPIC command
 [ ] MODE command
 [ ] NAMES command
 [ ] WHOIS command

@@ -180,7 +180,8 @@ if [[ -z "$IRC_CONN_HANDLER" ]]; then
   query 'CREATE TABLE IF NOT EXISTS channels
     (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name varchar(201) NOT NULL UNIQUE
+      name varchar(201) NOT NULL UNIQUE,
+      topic varchar(500)
     );'
 
   query 'INSERT INTO channels(name) VALUES("#test");'
@@ -291,6 +292,28 @@ else
         fi
         printf "%s\r\n" ":$NICK PRIVMSG $TARGET $MSG" | broadcast
         ;;
+
+      TOPIC)
+        # TODO
+        CHANNEL="${arr[0]}"
+        arr=("${arr[@]:1}")
+        # TOPIC="$(query "SELECT topic FROM channels WHERE name = ?;" "$CHANNEL")"
+        # reply TOPIC "$CHANNEL" "$TOPIC"
+        ;;
+      LIST)
+        while IFS=$'\t' read -r channel_id channel visible topic; do
+          reply 322 "$NICK $channel $visible :$topic"
+        done <<< "$(query "SELECT
+          channels.id,
+          channels.name,
+          COUNT(membership.who) AS visible,
+          channels.topic
+        FROM channels
+        LEFT JOIN membership
+        ON membership.channel = channels.id
+        GROUP BY channels.id, channels.name, channels.topic;")"
+        reply 323 ":End of LIST"
+        ;;
       JOIN)
         if [[ "${arr[@]}" == "0" ]]; then
           debug "joins: $NICK did join 0"
@@ -304,7 +327,7 @@ else
           split "$KEYS" ','
           KEYS=("${arr[@]}")
           for CHANNEL in ${CHANNELS[@]}; do
-            CHANNEL_ID="$(query "SELECT id FROM channels WHERE name = ?;" "$CHANNEL")"
+            IFS=$'\t' read -r CHANNEL_ID TOPIC <<< "$(query "SELECT id, topic FROM channels WHERE name = ?;" "$CHANNEL")"
             if [[ -z "$CHANNEL_ID" ]]; then
               continue
             fi
@@ -312,7 +335,12 @@ else
             debug "joins: $NICK joined $CHANNEL"
             SUBS["$CHANNEL"]=true
             printf "%s\r\n" ":$NICK!$USER@$IRC_SERVER_HOST JOIN :$CHANNEL" | broadcast
-            reply 366 $NICK $CHANNEL :
+            EVERYONE="$(query "SELECT conns.nick FROM membership LEFT JOIN conns
+            ON conns.id = membership.who WHERE membership.channel = ?;" "$CHANNEL_ID")"
+            EVERYONE="${EVERYONE//$'\n'/ }"
+            reply 353 "$NICK" '=' "$CHANNEL" ":$EVERYONE"
+            reply 366 "$NICK" "$CHANNEL" ':'
+            reply 332 "$NICK" "$CHANNEL" ":$TOPIC"
           done
         fi
         ;;
@@ -328,6 +356,7 @@ else
         CHANNELS=("${arr[@]}")
         split "$KEYS" ','
         KEYS=("${arr[@]}")
+        query "DELETE FROM membership WHERE channel = ? AND who = ?;" "$CHANNEL_ID" "$CONN_ID"
 
         for CHANNEL in ${CHANNELS[@]}; do
           unset SUBS["$CHANNEL"]

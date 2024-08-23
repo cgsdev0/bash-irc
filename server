@@ -52,7 +52,7 @@ function listen() {
   local TOPIC
   TOPIC="$1"
   if [[ -z "$TOPIC" ]]; then
-    debug "ATTEMPTED TO LISTEN ON EMPTY TOPIC"
+    debug "listen: ATTEMPTED TO LISTEN ON EMPTY TOPIC"
     return
   fi
   local -a arr
@@ -72,7 +72,6 @@ function listen() {
     case "$COMMAND" in
       PSST)
         # internal stuff dont worry its all good
-        debug "psst: ${arr[*]}"
         CMD="${arr[0]}"
         arr=("${arr[@]:1}")
         case "$CMD" in
@@ -95,7 +94,7 @@ function listen() {
       PART)
         CHANNEL="${arr[0]:1}"
         if [[ "$USER" == "$NICK" ]]; then
-          debug "listener: $USER PARTED from $CHANNEL"
+          # debug "listener: $USER PARTED from $CHANNEL"
           unset SUBS["$CHANNEL"]
         fi
         ;;
@@ -111,7 +110,7 @@ function listen() {
         ;;
     esac
     if [[ "$USER" != "$NICK" && -n "$CHANNEL" ]]; then
-      [[ -z "${SUBS[$CHANNEL]}" ]] && debug "FILTERED BY '$CHANNEL' '$USER' '$NICK'" && continue
+      [[ -z "${SUBS[$CHANNEL]}" ]] && continue
     fi
     # forward the message
     printf "%s\n" "$line"
@@ -149,7 +148,7 @@ reply() {
   printf -v "RESPONSE" ":%s %s\r\n" "$IRC_SERVER_HOST" "$*"
   RESPONSE="${RESPONSE:0:512}"
   printf "%s" "$RESPONSE"
-  debug "outbound[$CONN_ID]: ${RESPONSE//$'\n'/}"
+  [[ -z "$SILENT" ]] && debug "outbound[$CONN_ID]: ${RESPONSE//$'\n'/}"
 }
 
 debug() {
@@ -159,16 +158,16 @@ debug() {
 heartbeat() {
   while true; do
     if [[ ! -f "$HEARTBEAT" ]]; then
-      debug "heartbeat: already closed"
       exit 1
     fi
     if [[ "$(<$HEARTBEAT)" -lt $PING ]]; then
-      debug "heartbeat: ping lt $PING, disconnecting"
+      debug "heartbeat[$CONN_ID]: failed to pong; hanging up"
+      kill $SOUL
       exit 1
     fi
-    reply PING ":$PING"
+    SILENT=true reply PING ":$PING"
     ((PING++))
-    sleep 60
+    sleep 10
   done
 }
 
@@ -230,11 +229,12 @@ else
   listen "$SUBSCRIPTION" &
   mkdir -p pubsub/heartbeat
   HEARTBEAT="$(mktemp -p pubsub/heartbeat)"
-  debug "heartbeat: opened $HEARTBEAT"
+  # debug "heartbeat: opened $HEARTBEAT"
   echo 0 > "$HEARTBEAT"
-  heartbeat &
   CONN_ID="$(query 'INSERT INTO conns DEFAULT VALUES RETURNING id;')"
-  debug "conn_id: $CONN_ID"
+  SOUL=$$
+  heartbeat &
+  # debug "conn_id: $CONN_ID"
   trap unsubscribe EXIT
   while IFS= read -r line; do
     split "${line//$'\r'}" ' '
@@ -260,8 +260,8 @@ else
         else
           RESULT="$(query 'UPDATE conns SET nick = ? WHERE id = ?;' "$NEW_NICK" "$CONN_ID")"
           if [[ -n "$RESULT" ]]; then
-            debug "result: $RESULT"
-            debug "error: nickname $NEW_NICK already in use"
+            # debug "result: $RESULT"
+            # debug "error: nickname $NEW_NICK already in use"
             reply 433 '*' $NEW_NICK ":Nickname is already in use"
           else
             if [[ -n "$NICK" ]]; then
@@ -269,7 +269,6 @@ else
               NICK="$NEW_NICK"
             else
               NICK="$NEW_NICK"
-              debug "PSSSSSSSSSSSST NICK $NICK"
               echo "PSST NICK $NICK" > "$SUBSCRIPTION"
               welcome
             fi
@@ -334,7 +333,6 @@ else
               continue
             fi
             query "INSERT INTO membership(channel, who) VALUES(?, ?);" "$CHANNEL_ID" "$CONN_ID"
-            debug "joins: $NICK joined $CHANNEL"
             SUBS["$CHANNEL"]=true
             printf "%s\r\n" ":$NICK!$USER@$IRC_SERVER_HOST JOIN :$CHANNEL" | broadcast
             EVERYONE="$(query "SELECT conns.nick FROM membership LEFT JOIN conns
@@ -365,7 +363,7 @@ else
         done
         ;;
       PING)
-        reply PONG "$NICK" "${arr[0]}"
+        SILENT=true reply PONG "$NICK" "${arr[0]}"
         ;;
       PONG)
         ((PONG++))

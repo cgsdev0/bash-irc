@@ -167,7 +167,7 @@ heartbeat() {
     fi
     SILENT=true reply PING ":$PING"
     ((PING++))
-    sleep 10
+    sleep 60
   done
 }
 

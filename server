@@ -287,6 +287,7 @@ else
         TARGET="${arr[0]}"
         arr=("${arr[@]:1}")
         MSG="${arr[*]}"
+        MSG="${MSG//$'\n'/}"
         if [[ "${MSG:0:1}" != ":" ]]; then
           MSG=":$MSG"
         fi

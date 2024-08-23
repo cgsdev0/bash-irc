@@ -131,7 +131,7 @@ function unsubscribe() {
   debug "pipe: closed: $SUBSCRIPTION"
   [[ ! -z "$SUBSCRIPTION" ]] && rm -f "$SUBSCRIPTION"
   printf "%s\r\n" ":$NICK!$USER@$IRC_SERVER_HOST QUIT :$QUIT_MESSAGE" | broadcast
-  query 'DELETE FROM conns WHERE id = ?;' "$CONN_ID"
+  query 'DELETE FROM conns WHERE id = ?;' "$CONN_ID" &> /dev/null
   rm -rf "$HEARTBEAT"
 }
 
